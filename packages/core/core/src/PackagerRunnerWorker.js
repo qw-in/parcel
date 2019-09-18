@@ -5,15 +5,8 @@ import type SourceMap from '@parcel/source-map';
 import type {Bundle as InternalBundle, ParcelOptions} from './types';
 import type ParcelConfig from './ParcelConfig';
 import type InternalBundleGraph from './BundleGraph';
-import type {FileSystem, FileOptions} from '@parcel/fs';
 
-import {
-  urlJoin,
-  md5FromObject,
-  md5FromString,
-  blobToStream
-} from '@parcel/utils';
-import {Readable} from 'stream';
+import {urlJoin, md5FromString, blobToStream} from '@parcel/utils';
 import invariant from 'assert';
 import nullthrows from 'nullthrows';
 import path from 'path';
@@ -29,6 +22,7 @@ import BundleGraph, {
   bundleGraphToInternalBundleGraph
 } from './public/BundleGraph';
 import PluginOptions from './public/PluginOptions';
+import writeBundle from './writeBundle';
 
 type Opts = {|
   config: ParcelConfig,
@@ -49,49 +43,12 @@ export default class PackagerRunner {
     this.pluginOptions = new PluginOptions(this.options);
   }
 
-  async getBundleResult(
-    bundle: InternalBundle,
-    bundleGraph: InternalBundleGraph
-  ): Promise<{|contents: Blob, map: ?(Readable | string)|}> {
-    let cacheKey;
-    if (!this.options.disableCache) {
-      cacheKey = await this.getCacheKey(bundle, bundleGraph);
-      let cacheResult = await this.readFromCache(cacheKey);
-
-      if (cacheResult) {
-        // NOTE: Returning a new object for flow
-        return {
-          contents: cacheResult.contents,
-          map: cacheResult.map
-        };
-      }
-    }
-
-    let packaged = await this.package(bundle, bundleGraph);
-    let res = await this.optimize(
-      bundle,
-      bundleGraph,
-      packaged.contents,
-      packaged.map
-    );
-
-    let map = res.map ? await this.generateSourceMap(bundle, res.map) : null;
-    let result = {
-      contents: res.contents,
-      map
-    };
-
-    if (cacheKey != null) {
-      await this.writeToCache(cacheKey, result.contents, map);
-    }
-
-    return result;
-  }
-
   async packageAndOptimize(
     bundle: InternalBundle,
-    bundleGraph: InternalBundleGraph
+    bundleGraph: InternalBundleGraph,
+    cacheKey
   ) {
+    //console.log('PACKAGING AND OPTIMIZING');
     let packaged = await this.package(bundle, bundleGraph);
     let res = await this.optimize(
       bundle,
@@ -101,55 +58,21 @@ export default class PackagerRunner {
     );
 
     let map = res.map ? await this.generateSourceMap(bundle, res.map) : null;
-    return {
-      contents: res.contents,
-      map
-    };
-  }
 
-  async writeBundle(bundle: InternalBundle, bundleGraph: InternalBundleGraph) {
-    let {inputFS, outputFS} = this.options;
-    let start = Date.now();
-
-    let {contents, map} = await this.getBundleResult(bundle, bundleGraph);
-    let filePath = nullthrows(bundle.filePath);
-    let dir = path.dirname(filePath);
-    if (!this.distExists.has(dir)) {
-      await outputFS.mkdirp(dir);
-      this.distExists.add(dir);
+    //console.log('WRITING TO CACHE', bundle.filePath, cacheKey);
+    if (cacheKey != null) {
+      await this.writeToCache(cacheKey, packaged.contents, map);
     }
 
-    // Use the file mode from the entry asset as the file mode for the bundle.
-    // Don't do this for browser builds, as the executable bit in particular is unnecessary.
-    let publicBundle = new NamedBundle(bundle, bundleGraph, this.options);
-    let options = publicBundle.env.isBrowser()
-      ? undefined
-      : {
-          mode: (await inputFS.stat(
-            nullthrows(publicBundle.getMainEntry()).filePath
-          )).mode
-        };
+    let {size} = await writeBundle({
+      bundle,
+      bundleGraph,
+      contents: packaged.contents,
+      map,
+      options: this.options
+    });
 
-    let size;
-    if (contents instanceof Readable) {
-      size = await writeFileStream(outputFS, filePath, contents, options);
-    } else {
-      await outputFS.writeFile(filePath, contents, options);
-      size = contents.length;
-    }
-
-    if (map != null) {
-      if (map instanceof Readable) {
-        await writeFileStream(outputFS, filePath + '.map', map);
-      } else {
-        await outputFS.writeFile(filePath + '.map', map);
-      }
-    }
-
-    return {
-      time: Date.now() - start,
-      size
-    };
+    return {size};
   }
 
   async package(
@@ -184,7 +107,7 @@ export default class PackagerRunner {
           );
         }
 
-        return this.getBundleResult(
+        return this.packageAndOptimize(
           bundleToInternalBundle(bundle),
           bundleGraphToInternalBundleGraph(bundleGraph)
         );
@@ -281,56 +204,6 @@ export default class PackagerRunner {
     });
   }
 
-  getCacheKey(
-    bundle: InternalBundle,
-    bundleGraph: InternalBundleGraph
-  ): string {
-    let filePath = nullthrows(bundle.filePath);
-    let packager = this.config.getPackagerName(filePath);
-    let optimizers = this.config.getOptimizerNames(filePath);
-    let deps = Promise.all(
-      [packager, ...optimizers].map(async pkg => {
-        let {pkg: resolvedPkg} = await this.options.packageManager.resolve(
-          `${pkg}/package.json`,
-          `${this.config.filePath}/index` // TODO: is this right?
-        );
-
-        let version = nullthrows(resolvedPkg).version;
-        return [pkg, version];
-      })
-    );
-
-    // TODO: add third party configs to the cache key
-    let {minify, scopeHoist, sourceMaps} = this.options;
-    return md5FromObject({
-      deps,
-      opts: {minify, scopeHoist, sourceMaps},
-      hash: bundleGraph.getHash(bundle)
-    });
-  }
-
-  async readFromCache(
-    cacheKey: string
-  ): Promise<?{|
-    contents: Readable,
-    map: ?Readable
-  |}> {
-    let contentKey = md5FromString(`${cacheKey}:content`);
-    let mapKey = md5FromString(`${cacheKey}:map`);
-
-    let contentExists = await this.options.cache.blobExists(contentKey);
-    if (!contentExists) {
-      return null;
-    }
-
-    let mapExists = await this.options.cache.blobExists(mapKey);
-
-    return {
-      contents: this.options.cache.getStream(contentKey),
-      map: mapExists ? this.options.cache.getStream(mapKey) : null
-    };
-  }
-
   async writeToCache(cacheKey: string, contents: Blob, map: ?Blob) {
     let contentKey = md5FromString(`${cacheKey}:content`);
 
@@ -341,22 +214,6 @@ export default class PackagerRunner {
       await this.options.cache.setStream(mapKey, blobToStream(map));
     }
   }
-}
-
-function writeFileStream(
-  fs: FileSystem,
-  filePath: FilePath,
-  stream: Readable,
-  options: ?FileOptions
-): Promise<number> {
-  return new Promise((resolve, reject) => {
-    let fsStream = fs.createWriteStream(filePath, options);
-    stream
-      .pipe(fsStream)
-      // $FlowFixMe
-      .on('finish', () => resolve(fsStream.bytesWritten))
-      .on('error', reject);
-  });
 }
 
 /*

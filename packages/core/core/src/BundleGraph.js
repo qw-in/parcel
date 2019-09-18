@@ -44,18 +44,29 @@ export default class BundleGraph {
   // to any asset change, so this doesn't need much invalidation. However, currently namers run
   // before runtimes, and can access `getHash` despite runtimes altering bundle content later.
   // TODO: Implement invalidation since runtimes can alter bundle contents?
-  _bundleContentHashes: Map<string, string> = new Map();
+  _bundleContentHashes: Map<string, string>;
   _graph: Graph<BundleGraphNode, BundleGraphEdgeTypes>;
 
-  constructor(graph: Graph<BundleGraphNode, BundleGraphEdgeTypes>) {
+  constructor({
+    graph,
+    bundleContentHashes
+  }: {|
+    graph: Graph<BundleGraphNode, BundleGraphEdgeTypes>,
+    bundleContentHashes?: Map<string, string>
+  |}) {
     this._graph = graph;
+    this._bundleContentHashes = bundleContentHashes || new Map();
   }
 
   static deserialize(opts: {
     _graph: Graph<BundleGraphNode, BundleGraphEdgeTypes>,
+    _bundleContentHashes: Map<string, string>,
     ...
   }): BundleGraph {
-    return new BundleGraph(opts._graph);
+    return new BundleGraph({
+      graph: opts._graph,
+      bundleContentHashes: opts._bundleContentHashes
+    });
   }
 
   addAssetToBundle(asset: Asset, bundle: Bundle) {

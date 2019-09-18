@@ -24,6 +24,7 @@ import WorkerFarm from '@parcel/workers';
 import nullthrows from 'nullthrows';
 import path from 'path';
 import AssetGraphBuilder, {BuildAbortError} from './AssetGraphBuilder';
+import PackagerRunnerMain from './PackagerRunnerMain';
 import loadParcelConfig from './loadParcelConfig';
 import ReporterRunner from './ReporterRunner';
 import dumpGraphToGraphViz from './dumpGraphToGraphViz';
@@ -199,7 +200,7 @@ export default class Parcel {
         bundleGraph,
         config: this.#config,
         options,
-        runPackage: this.#runPackage
+        farm: this.#farm
       });
 
       let event = {
@@ -317,18 +318,11 @@ function packageBundles({
   bundleGraph,
   config,
   options,
-  runPackage
+  farm
 }: {
   bundleGraph: InternalBundleGraph,
   config: ParcelConfig,
   options: ParcelOptions,
-  runPackage: ({
-    bundle: IBundle,
-    bundleGraph: InternalBundleGraph,
-    config: ParcelConfig,
-    options: ParcelOptions,
-    ...
-  }) => Promise<Stats>,
   ...
 }): Promise<mixed> {
   let promises = [];
@@ -339,9 +333,11 @@ function packageBundles({
     }
 
     promises.push(
-      runPackage({bundle, bundleGraph, config, options}).then(stats => {
-        bundle.stats = stats;
-      })
+      new PackagerRunnerMain({config, options, farm})
+        .writeBundle(bundle, bundleGraph)
+        .then(stats => {
+          bundle.stats = stats;
+        })
     );
   }
 

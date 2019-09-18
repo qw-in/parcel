@@ -5,7 +5,7 @@ import type BundleGraph from './BundleGraph';
 import type {WorkerApi} from '@parcel/workers';
 
 import Transformation, {type TransformationOpts} from './Transformation';
-import PackagerRunner from './PackagerRunner';
+import PackagerRunnerWorker from './PackagerRunnerWorker';
 import Validation, {type ValidationOpts} from './Validation';
 import ParcelConfig from './ParcelConfig';
 import registerCoreWithSerializer from './registerCoreWithSerializer';
@@ -46,7 +46,8 @@ export function runPackage(
     bundle,
     bundleGraph,
     config,
-    options
+    options,
+    cacheKey
   }: {
     bundle: Bundle,
     bundleGraph: BundleGraph,
@@ -55,8 +56,8 @@ export function runPackage(
     ...
   }
 ) {
-  return new PackagerRunner({
+  return new PackagerRunnerWorker({
     config,
     options
-  }).writeBundle(bundle, bundleGraph);
+  }).packageAndOptimize(bundle, bundleGraph, cacheKey);
 }
